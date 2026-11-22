@@ -50,7 +50,7 @@ work.zip
         └── shell.qml
 ```
 
-Put `hyprloader.json` at the archive root or in its top-level folder to set a display name, add an icon, or select the configuration files explicitly. Paths are relative to the manifest. The `name`, `description`, and `icon` fields are optional.
+Put `hyprloader.json` at the archive root or in its top-level folder to set a display name, add an icon, or select the configuration files explicitly. Paths are relative to the manifest. You can specify only the fields you need. Any omitted entry files are detected automatically.
 
 ```json
 {
@@ -72,6 +72,10 @@ hyprloader add work ~/.config/hypr-work/hyprland.lua ~/.config/quickshell/work/s
 
 If Quickshell needs a custom launcher, set `quickshell_runner` to an executable path inside the archive. The launcher receives the absolute path to the QML file as its first argument.
 
+A ZIP with both `hyprland.lua` and `hyprland.conf` in the same directory can serve both config formats. Hyprloader uses the `.conf` on versions before 0.55. In a manifest with explicit file paths, you can set `hyprland_legacy` to the alternate `.conf` path.
+
+When both configuration files sit inside a shared `.config` directory in the archive, Hyprloader sets `XDG_CONFIG_HOME` to that directory for the profile. You can set `config_home` in the manifest to select a different directory. `HYPRLOADER_PROFILE_DIR` points to the root of the extracted archive so configs and scripts can find bundled files. Paths hardcoded to `~/.config` still refer to the user's home configuration.
+
 ## Customizing the menu
 
 Edit **`~/.config/hyprloader/theme.json`** and run `hyprloader preview`. Include only the settings you want to change.
@@ -83,8 +87,13 @@ Edit **`~/.config/hyprloader/theme.json`** and run `hyprloader preview`. Include
   "fontFamily": "Inter",
   "backgroundImage": "wallpapers/menu.jpg",
   "backgroundMode": "cover",
+  "wallpaperDim": 0.3,
+  "brandImage": "icons/brand.svg",
+  "menuAlignment": "right",
   "menuWidth": 560,
+  "panelPadding": 20,
   "rowHeight": 56,
+  "rowGap": 8,
   "rowRadius": 12,
   "iconSize": 30,
   "textSize": 21,
@@ -97,25 +106,42 @@ Edit **`~/.config/hyprloader/theme.json`** and run `hyprloader preview`. Include
     "muted": "#bac1d0",
     "profile": "#d8dde8",
     "selected": "#323c52",
-    "search": "#212736"
+    "search": "#212736",
+    "panel": "#cc181820",
+    "panelBorder": "#323c52"
   },
   "icons": {
     "work": "icons/work.svg",
     "serpantinum:default": "icons/default.svg"
-  }
+  },
+  "defaultProfile": "work",
+  "profileOrder": ["work", "serpantinum:default"],
+  "timeoutSeconds": 5
 }
 ```
 
 | Setting | What it controls |
 | --- | --- |
 | `backgroundImage`, `backgroundMode` | Background image and how it fits the screen. Choose `cover`, `contain`, or `stretch` |
+| `wallpaperDim`, `brandImage` | Backdrop dimming from 0 to 1 and a custom image beside the title |
+| `monitor` | Screen name for the menu, for example `DP-1` |
+| `menuAlignment`, `menuMargin` | Align the menu `left`, `center`, or `right`, and set the edge margin. `auto` uses the wide-screen horizontal offset |
+| `panelPadding`, `panelRadius`, `colors.panel`, `colors.panelBorder` | Menu panel inset, corner radius, background, and border. Use `#AARRGGBB` for transparency |
 | `showBackdrop` | Geometric backdrop when no background image is set |
 | `showBrand`, `showDescription`, `showHints` | Hyprloader logo, profile descriptions, and keyboard hints |
+| `showIcons`, `showSelectionMarker` | Profile icons and markers around the selected row |
 | `menuWidth`, `rowHeight`, `rowRadius`, `iconSize`, `textSize` | Interface dimensions. Set `rowHeight` to `0` for automatic sizing |
+| `rowGap`, `titleSize` | Spacing between entries and title size. Set `titleSize` to `0` for automatic sizing |
 | `horizontalOffset`, `verticalOffset` | Menu offset from the center. The horizontal offset is a percentage on wide screens, and the vertical offset is in pixels |
 | `icons` | SVG or PNG icons keyed by the profile IDs from `hyprloader list` |
+| `defaultProfile`, `profileOrder` | Default profile ID and profile IDs that should appear first |
+| `timeoutSeconds` | Delay before the built-in login menu launches the default. A keypress cancels the countdown. Set to `0` to disable it |
 | `layout`, `rofiTheme` | Paths to a custom QML layout and fallback Rofi theme |
 
 Wallpaper, icon, and layout paths are relative to the directory containing `theme.json`. Absolute paths and `~` are also supported. Hyprloader respects `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, and `XDG_STATE_HOME`.
 
 To redesign the whole menu, copy `app/menu.qml`, `app/ProfileIcon.qml`, and `app/Backdrop.qml` into your theme directory and set `layout` to your copy of `menu.qml`. The layout reads JSON from the file named by `HYPRLOADER_MENU_DATA`, writes the selected profile ID to the file named by `HYPRLOADER_MENU_CHOICE`, and exits Quickshell with `Qt.quit()`. The bundled layout serves as a fallback.
+
+## When a profile fails to start
+
+Run `hyprloader list` to find its ID, then run `hyprloader doctor work` with that ID. It checks the selected Hyprland file on builds that provide `--verify-config` and prints the Quickshell command. The last customized session attempt writes `session.log` and `quickshell.log` in `~/.local/state/hyprloader/logs/`. The first shows config verification and compositor startup, and the second shows Quickshell output, including QML errors.

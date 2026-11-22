@@ -79,6 +79,25 @@ class ImportTests(unittest.TestCase):
         self.assertTrue(os.access(profile / info["quickshell_runner"], os.X_OK))
         self.assertIn("choice\tChoice", self.run_loader("list").stdout)
 
+    def test_manifest_can_add_metadata_without_repeating_entry_paths(self):
+        self.write_zip("both.zip", CONFIGS | {
+            "bundle/.config/hypr/hyprland.conf": "monitor = ,preferred,auto,1",
+            "bundle/hyprloader.json": json.dumps({"name": "Both formats", "icon": "missing.svg", "config_home": ".config"}),
+        })
+        self.assertIn("both\tBoth formats", self.run_loader("list").stdout)
+        info = json.loads((self.installed / "both/profile.json").read_text())
+        self.assertEqual(info["hyprland_legacy"], "files/bundle/.config/hypr/hyprland.conf")
+        self.assertEqual(info["config_home"], "files/bundle/.config")
+        self.assertNotIn("icon", info)
+
+    def test_missing_optional_icon_does_not_hide_an_installed_profile(self):
+        self.write_zip("keep.zip", CONFIGS)
+        self.run_loader("list")
+        metadata = self.installed / "keep/profile.json"
+        info = json.loads(metadata.read_text())
+        metadata.write_text(json.dumps(info | {"icon": "files/removed.svg"}))
+        self.assertIn("keep\tkeep", self.run_loader("list").stdout)
+
     def test_bad_zip_does_not_block_menu_and_can_be_retried(self):
         path = self.write_zip("retry.zip", CONFIGS)
         path.write_bytes(b"unfinished")

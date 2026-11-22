@@ -13,22 +13,26 @@ ShellRoot {
     readonly property color accent: palette.accent
     property bool choosing: false
     property bool searching: false
+    property int remaining: data.atLogin ? Math.floor(theme.timeoutSeconds) : 0
     readonly property string query: searchInput.text.trim().toLowerCase()
     readonly property var choices: query === "" ? data.profiles : data.profiles.filter(
         profile => (profile.name + " " + profile.description).toLowerCase().includes(query))
     readonly property int defaultIndex: data.profiles.findIndex(profile => profile.id === data.defaultId)
-    readonly property string monitorName: data.monitorName ?? ""
+    readonly property string monitorName: theme.monitor || data.monitorName || ""
 
     function select(id: string): void {
         if (!choosing) {
             choosing = true
+            remaining = 0
             result.setText(id)
         }
     }
 
     function changeSelection(delta: int): void {
-        if (choices.length > 0)
-            options.currentIndex = (options.currentIndex + delta + choices.length) % choices.length
+        if (choices.length > 0) {
+            const current = options.currentIndex >= 0 ? options.currentIndex : (delta > 0 ? -1 : 0)
+            options.currentIndex = (current + delta + choices.length) % choices.length
+        }
     }
 
     function showSearch(): void {
@@ -39,11 +43,12 @@ ShellRoot {
     function closeSearch(): void {
         searching = false
         searchInput.clear()
-        options.currentIndex = defaultIndex
+        Qt.callLater(() => options.currentIndex = defaultIndex)
         surface.forceActiveFocus()
     }
 
     function handleKey(event: KeyEvent): void {
+        remaining = 0
         switch (event.key) {
         case Qt.Key_Up:
             changeSelection(-1)
@@ -53,7 +58,7 @@ ShellRoot {
             break
         case Qt.Key_Return:
         case Qt.Key_Enter:
-            if (options.currentIndex >= 0)
+            if (options.currentIndex >= 0 && options.currentIndex < choices.length)
                 select(choices[options.currentIndex].id)
             break
         case Qt.Key_Escape:
@@ -70,6 +75,17 @@ ShellRoot {
             return
         }
         event.accepted = true
+    }
+
+    Timer {
+        interval: 1000
+        repeat: true
+        running: root.remaining > 0
+        onTriggered: {
+            root.remaining -= 1
+            if (root.remaining === 0)
+                root.select(root.data.defaultId)
+        }
     }
 
     FileView {
@@ -89,6 +105,7 @@ ShellRoot {
     PanelWindow {
         id: panel
         screen: Quickshell.screens.find(output => output.name === root.monitorName)
+                ?? Quickshell.screens.find(output => output.name === root.data.monitorName)
                 ?? Quickshell.screens[0] ?? null
         anchors { left: true; right: true; top: true; bottom: true }
         exclusionMode: ExclusionMode.Ignore
@@ -105,7 +122,10 @@ ShellRoot {
 
             readonly property int rowHeight: root.theme.rowHeight || (height < 580 ? 44 : 54)
             readonly property string typeface: root.theme.fontFamily
-            readonly property real interfaceScale: Math.max(1, Math.min(1.3, height / 920))
+            readonly property real interfaceScale: height < 580
+                ? Math.max(0.72, height / 580) : Math.max(1, Math.min(1.3, height / 920))
+            readonly property real panelPadding: Math.min(root.theme.panelPadding, width / 10, height / 12)
+            readonly property real outerMargin: Math.min(root.theme.menuMargin, width / 6) + panelPadding * interfaceScale
 
             Backdrop {
                 anchors.fill: parent
@@ -122,14 +142,42 @@ ShellRoot {
                 asynchronous: true
             }
 
+            Rectangle {
+                anchors.fill: parent
+                color: "black"
+                opacity: root.theme.wallpaperDim
+                visible: wallpaper.status === Image.Ready || root.theme.showBackdrop
+            }
+
+            Rectangle {
+                width: content.width * content.scale + 2 * surface.panelPadding * content.scale
+                height: content.height * content.scale + 2 * surface.panelPadding * content.scale
+                x: content.x + (content.width - width) / 2
+                y: content.y + (content.height - height) / 2
+                radius: root.theme.panelRadius
+                color: root.palette.panel
+                border.color: root.palette.panelBorder
+            }
+
             Column {
                 id: content
                 anchors.centerIn: parent
-                readonly property real offsetLimit: Math.max(0, (surface.width - width * scale - 32) / 2)
-                anchors.horizontalCenterOffset: surface.width > 950
-                    ? Math.max(-offsetLimit, Math.min(offsetLimit, surface.width * root.theme.horizontalOffset / 100)) : 0
-                anchors.verticalCenterOffset: root.theme.verticalOffset
-                width: Math.max(0, Math.min(root.theme.menuWidth, (surface.width - 44) / scale))
+                readonly property real offsetLimit: Math.max(0, (surface.width - width * scale) / 2 - surface.outerMargin)
+                readonly property real verticalLimit: Math.max(0, (surface.height - height * scale) / 2
+                                                                - surface.panelPadding * scale - 14)
+                anchors.horizontalCenterOffset: {
+                    switch (root.theme.menuAlignment) {
+                    case "left": return -offsetLimit
+                    case "right": return offsetLimit
+                    case "center": return 0
+                    default:
+                        return surface.width > 950
+                            ? Math.max(-offsetLimit, Math.min(offsetLimit, surface.width * root.theme.horizontalOffset / 100))
+                            : 0
+                    }
+                }
+                anchors.verticalCenterOffset: Math.max(-verticalLimit, Math.min(verticalLimit, root.theme.verticalOffset))
+                width: Math.max(0, Math.min(root.theme.menuWidth, (surface.width - 2 * surface.outerMargin) / scale))
                 scale: surface.interfaceScale
                 spacing: 12
 
@@ -143,22 +191,32 @@ ShellRoot {
 
                         Item {
                             id: brand
-                            width: 24
+                            width: brandImage.status === Image.Ready ? 38 : 24
                             height: 30
                             anchors.verticalCenter: parent.verticalCenter
                             visible: root.theme.showBrand
+
+                            Image {
+                                id: brandImage
+                                anchors.fill: parent
+                                source: root.theme.brandImage
+                                fillMode: Image.PreserveAspectFit
+                                sourceSize: Qt.size(76, 60)
+                            }
 
                             Rectangle {
                                 x: 3; y: 6; width: 5; height: 19
                                 radius: 1
                                 rotation: 24
                                 color: root.accent
+                                visible: brandImage.status !== Image.Ready
                             }
                             Rectangle {
                                 x: 12; y: 2; width: 5; height: 26
                                 radius: 1
                                 rotation: 24
                                 color: Qt.lighter(root.accent, 1.18)
+                                visible: brandImage.status !== Image.Ready
                             }
                         }
                         Text {
@@ -170,7 +228,7 @@ ShellRoot {
                             elide: Text.ElideRight
                             color: root.palette.text
                             font.family: surface.typeface
-                            font.pixelSize: surface.height < 580 ? 32 : 40
+                            font.pixelSize: root.theme.titleSize || (surface.height < 580 ? 32 : 40)
                             font.weight: Font.DemiBold
                             font.letterSpacing: -1.3
                         }
@@ -234,9 +292,9 @@ ShellRoot {
                     id: options
                     width: parent.width
                     height: Math.min(Math.max(1, count) * (surface.rowHeight + spacing) - spacing,
-                                     Math.max(surface.rowHeight, surface.height / surface.interfaceScale - 260))
+                                     Math.max(surface.rowHeight, surface.height / surface.interfaceScale - 260 - 2 * surface.panelPadding))
                     clip: true
-                    spacing: 4
+                    spacing: root.theme.rowGap
                     model: root.choices
                     boundsBehavior: Flickable.StopAtBounds
                     keyNavigationEnabled: false
@@ -262,11 +320,11 @@ ShellRoot {
                             height: Math.min(23, row.height - 6)
                             radius: 1.5
                             color: root.accent
-                            visible: row.selected
+                            visible: row.selected && root.theme.showSelectionMarker
                         }
 
                         ProfileIcon {
-                            visible: profileImage.status !== Image.Ready
+                            visible: root.theme.showIcons && profileImage.status !== Image.Ready
                             anchors.left: parent.left
                             anchors.leftMargin: 17
                             anchors.verticalCenter: parent.verticalCenter
@@ -278,6 +336,7 @@ ShellRoot {
 
                         Image {
                             id: profileImage
+                            visible: root.theme.showIcons
                             anchors.left: parent.left
                             anchors.leftMargin: 17
                             anchors.verticalCenter: parent.verticalCenter
@@ -290,7 +349,7 @@ ShellRoot {
 
                         Text {
                             anchors.left: parent.left
-                            anchors.leftMargin: 33 + row.glyphSize
+                            anchors.leftMargin: root.theme.showIcons ? 33 + row.glyphSize : 17
                             anchors.right: parent.right
                             anchors.rightMargin: 42
                             anchors.verticalCenter: parent.verticalCenter
@@ -308,7 +367,7 @@ ShellRoot {
                             anchors.rightMargin: 16
                             anchors.verticalCenter: parent.verticalCenter
                             text: "↵"
-                            visible: row.selected
+                            visible: row.selected && root.theme.showSelectionMarker
                             color: root.palette.muted
                             font.pixelSize: 18
                         }
@@ -341,6 +400,15 @@ ShellRoot {
                     text: root.choices[options.currentIndex]?.description ?? ""
                     textFormat: Text.PlainText
                     elide: Text.ElideRight
+                    color: root.palette.muted
+                    font.family: surface.typeface
+                    font.pixelSize: 13
+                }
+
+                Text {
+                    width: parent.width
+                    visible: root.remaining > 0
+                    text: qsTr("Автозапуск через %1 с").arg(root.remaining)
                     color: root.palette.muted
                     font.family: surface.typeface
                     font.pixelSize: 13

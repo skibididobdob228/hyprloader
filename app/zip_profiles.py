@@ -97,15 +97,14 @@ def archive_profile(folder, archive):
     profile["archive"] = archive.name
     entries = {
         "hyprland": ("hyprland.lua", "hyprland.conf"),
+        "hyprland_legacy": (),
         "quickshell": ("shell.qml",),
         "quickshell_runner": (),
         "icon": (),
     }
     for key, names in entries.items():
-        if manifest is not None:
-            if key not in data and not names:
-                continue
-            value = data.get(key)
+        if key in data:
+            value = data[key]
             if not isinstance(value, str) or not value:
                 raise ValueError(f"укажи относительный путь {key} в hyprloader.json")
             path = manifest.parent / archive_path(value)
@@ -113,15 +112,31 @@ def archive_profile(folder, archive):
             path = find_entry(folder, names)
         else:
             continue
+        if key == "icon" and not path.is_file():
+            continue
         if not path.is_file():
             raise ValueError(f"файл для {key} отсутствует: {path.relative_to(folder)}")
-        if key == "hyprland" and path.suffix not in (".lua", ".conf"):
+        if key == "hyprland" and path.suffix.lower() not in (".lua", ".conf"):
             raise ValueError("hyprland должен указывать на .lua или .conf")
-        if key == "quickshell" and path.suffix != ".qml":
+        if key == "hyprland_legacy" and path.suffix.lower() != ".conf":
+            raise ValueError("hyprland_legacy должен указывать на .conf")
+        if key == "quickshell" and path.suffix.lower() != ".qml":
             raise ValueError("quickshell должен указывать на .qml")
         if key == "quickshell_runner" and not path.stat().st_mode & 0o111:
             raise ValueError("quickshell_runner должен быть исполняемым")
         profile[key] = str(Path("files") / path.relative_to(folder))
+        if key == "hyprland" and "hyprland" not in data and path.suffix.lower() == ".lua":
+            legacy = path.with_suffix(".conf")
+            if legacy.is_file():
+                profile["hyprland_legacy"] = str(Path("files") / legacy.relative_to(folder))
+    if "config_home" in data:
+        value = data["config_home"]
+        if not isinstance(value, str) or not value:
+            raise ValueError("укажи относительный каталог config_home в hyprloader.json")
+        path = manifest.parent / (Path(".") if value == "." else archive_path(value))
+        if not path.is_dir():
+            raise ValueError(f"каталог config_home отсутствует: {path.relative_to(folder)}")
+        profile["config_home"] = str(Path("files") / path.relative_to(folder))
     return profile
 
 

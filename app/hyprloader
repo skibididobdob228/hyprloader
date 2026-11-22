@@ -9,12 +9,15 @@ import os
 from pathlib import Path
 import re
 import shlex
+import signal
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
+import time
 
 from hyprland_runtime import (
-    bootstrap_path, compositor_command, control, find_program, focused_monitor, wait_for_compositor,
+    bootstrap_path, belongs_to, compositor_command, compositor_process, control, find_program, focused_monitor,
+    profile_config, runtime_socket_path_too_long, verify_config, wait_for_compositor,
 )
 from menu_theme import load_theme
 from zip_profiles import ARCHIVE_ERRORS, import_archive, profile_store_lock
@@ -25,6 +28,7 @@ HOME = Path.home()
 CONFIG = Path(os.environ.get("XDG_CONFIG_HOME") or HOME / ".config") / "hyprloader"
 DATA = Path(os.environ.get("XDG_DATA_HOME") or HOME / ".local/share") / "hyprloader"
 STATE = Path(os.environ.get("XDG_STATE_HOME") or HOME / ".local/state") / "hyprloader"
+LOGS = STATE / "logs"
 INBOX = CONFIG / "imports"
 IMPORTED = DATA / "profiles"
 MANUAL = CONFIG / "profiles.d"
@@ -50,6 +54,9 @@ class Profile:
     quickshell: Path | None = None
     quickshell_runner: Path | None = None
     icon: Path | None = None
+    hyprland_legacy: Path | None = None
+    config_home: Path | None = None
+    archive_root: Path | None = None
 
 
 def report(message):
@@ -80,9 +87,25 @@ def profile_file(manifest, value, extensions=None):
     if not isinstance(value, str) or not value:
         raise ValueError("путь к конфигурации обязателен")
     path = manifest.parent / Path(value).expanduser()
-    if (extensions and path.suffix not in extensions) or not path.is_file() or not os.access(path, os.R_OK):
+    if (extensions and path.suffix.lower() not in extensions) or not path.is_file() or not os.access(path, os.R_OK):
         raise ValueError(f"файл конфигурации недоступен: {path}")
     return path.absolute()
+
+
+def profile_directory(manifest, info, hyprland, quickshell, archive_root):
+    if "config_home" in info:
+        value = info["config_home"]
+        if not isinstance(value, str) or not value:
+            raise ValueError("config_home must be a directory path.")
+        path = (manifest.parent / Path(value).expanduser()).absolute()
+        if not path.is_dir():
+            raise ValueError(f"config_home directory not found: {path}")
+        return path
+    if archive_root:
+        return next((path for path in hyprland.parents
+                     if path.name == ".config" and path.is_relative_to(archive_root)
+                     and quickshell.is_relative_to(path)), None)
+    return None
 
 
 def add_archive(archive, announce=False):
@@ -142,21 +165,36 @@ def profiles(scan=True):
             runner = profile_file(manifest, info["quickshell_runner"]) if "quickshell_runner" in info else None
             if runner and not os.access(runner, os.X_OK):
                 raise ValueError(f"файл запуска Quickshell не исполняемый: {runner}")
+            hyprland = profile_file(manifest, info.get("hyprland"), {".lua", ".conf"})
+            quickshell = profile_file(manifest, info.get("quickshell"), {".qml"})
+            archive_root = manifest.parent / "files" if manifest.parent.parent == IMPORTED else None
+            legacy = profile_file(manifest, info["hyprland_legacy"], {".conf"}) if "hyprland_legacy" in info else None
+            icon = None
+            if "icon" in info:
+                try:
+                    icon = profile_file(manifest, info["icon"])
+                except (OSError, ValueError) as error:
+                    report(error)
             found[key] = Profile(
                 key,
                 localized(info.get("name"), key),
                 localized(info.get("description"), "Hyprland + Quickshell"),
-                hyprland=profile_file(manifest, info.get("hyprland"), {".lua", ".conf"}),
-                quickshell=profile_file(manifest, info.get("quickshell"), {".qml"}),
+                hyprland=hyprland,
+                quickshell=quickshell,
                 quickshell_runner=runner,
-                icon=profile_file(manifest, info["icon"]) if "icon" in info else None,
+                icon=icon,
+                hyprland_legacy=legacy,
+                config_home=profile_directory(manifest, info, hyprland, quickshell, archive_root),
+                archive_root=archive_root,
             )
         except (OSError, RuntimeError, ValueError) as error:
             report(f"{manifest}: {error}")
     return found
 
 
-def choose_default(available):
+def choose_default(available, theme):
+    if theme["defaultProfile"] in available:
+        return theme["defaultProfile"]
     previous = read_text(STATE / "last-profile")
     if previous in available and available[previous].quickshell:
         return previous
@@ -194,8 +232,8 @@ def fallback_menu(available, default, theme):
     return default
 
 
-def menu(available, default):
-    theme = load_theme(APP, CONFIG, report)
+def menu(available, default, theme, at_login=False):
+    available = {key: available[key] for key in dict.fromkeys([*theme["profileOrder"], *available]) if key in available}
     quickshell = find_program("quickshell", "qs")
     if not quickshell:
         return fallback_menu(available, default, theme)
@@ -205,6 +243,7 @@ def menu(available, default):
         data.write_text(json.dumps({
             "defaultId": default,
             "monitorName": focused_monitor(),
+            "atLogin": at_login,
             "theme": theme,
             "profiles": [
                 {
@@ -285,10 +324,40 @@ def boot_menu():
     config = Path(os.environ["HYPRLOADER_BOOT_CONFIG"])
     try:
         available = profiles(scan=False)
-        chosen = menu(available, choose_default(available))
+        theme = load_theme(APP, CONFIG, report)
+        chosen = menu(available, choose_default(available, theme), theme, at_login=True)
         result_path.write_text(chosen + "\n", encoding="utf-8")
     finally:
-        control(instance, config)
+        try:
+            result = control(instance, config)
+            if result.returncode or result.stdout.strip() not in ("", "ok"):
+                report(f"Could not close the login menu compositor: {result.stderr.strip() or result.stdout.strip()}")
+        except (OSError, subprocess.TimeoutExpired) as error:
+            report(error)
+
+
+def finish_login_menu(launcher):
+    try:
+        launcher.wait(timeout=3)
+        return
+    except subprocess.TimeoutExpired:
+        report("The login menu did not exit after selection. Closing its temporary compositor.")
+    instance = compositor_process(launcher)
+    if instance:
+        _, pid = instance
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            if not belongs_to(pid, launcher.pid):
+                break
+            try:
+                os.kill(pid, sig)
+                launcher.wait(timeout=2)
+                return
+            except ProcessLookupError:
+                break
+            except subprocess.TimeoutExpired:
+                pass
+    launcher.kill()
+    launcher.wait()
 
 
 def select_at_login(available, default):
@@ -307,10 +376,12 @@ def select_at_login(available, default):
             "HYPRLOADER_BOOT_SELECTION": str(selection),
             "HYPRLOADER_BOOT_CONFIG": str(config),
         }
-        subprocess.run(
-            [dbus, "--", *compositor_command(config)],
-            env=env, check=False,
-        )
+        with subprocess.Popen([dbus, "--", *compositor_command(config)], env=env) as launcher:
+            while launcher.poll() is None:
+                if read_text(selection):
+                    finish_login_menu(launcher)
+                    break
+                time.sleep(0.1)
         return available.get(read_text(selection), available[default])
 
 
@@ -325,16 +396,109 @@ def remember(profile):
         report(error)
 
 
-def start_quickshell(launcher, profile, command):
+def shell_command(profile):
+    if profile.quickshell_runner:
+        return [str(profile.quickshell_runner), str(profile.quickshell)]
+    quickshell = find_program("quickshell", "qs")
+    if not quickshell:
+        raise FileNotFoundError("Quickshell executable not found on PATH.")
+    return [quickshell, "--no-duplicate", "--path", str(profile.quickshell)]
+
+
+def profile_environment(profile):
+    env = os.environ | {"HYPRLOADER_CUSTOM_SHELL": "1"}
+    if profile.archive_root:
+        env["HYPRLOADER_PROFILE_DIR"] = str(profile.archive_root)
+    if profile.config_home:
+        env["XDG_CONFIG_HOME"] = str(profile.config_home)
+    return env
+
+
+def run_shell(status, log_path, command):
+    with log_path.open("a", encoding="utf-8") as log:
+        try:
+            with subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT) as shell:
+                try:
+                    code = shell.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    status.write_text("running", encoding="utf-8")
+                    return shell.wait()
+        except OSError as error:
+            print(error, file=log)
+            code = 1
+    status.write_text(str(code), encoding="utf-8")
+    return code
+
+
+def start_quickshell(launcher, config, command, status, shell_log, log):
     instance = wait_for_compositor(launcher)
-    if instance:
-        launched = control(instance, profile.hyprland, shlex.join(command))
-        if launched.returncode == 0 and launched.stdout.strip() == "ok":
+    if not instance:
+        print("Could not find the new compositor instance.", file=log, flush=True)
+        if runtime_socket_path_too_long(os.environ["XDG_RUNTIME_DIR"]):
+            print("XDG_RUNTIME_DIR is too long for the Hyprland IPC socket path.", file=log, flush=True)
+        return False
+    launch = [str(APP / "hyprloader"), "_shell", str(status), str(shell_log), *command]
+    try:
+        launched = control(instance, config, shlex.join(launch))
+    except (OSError, subprocess.TimeoutExpired) as error:
+        print(error, file=log, flush=True)
+        return False
+    if launched.returncode or launched.stdout.strip() != "ok":
+        print(launched.stdout.strip() or launched.stderr.strip(), file=log, flush=True)
+        return False
+    deadline = time.monotonic() + 6
+    while launcher.poll() is None and time.monotonic() < deadline:
+        response = read_text(status)
+        if response:
+            if response not in ("0", "running"):
+                print(f"Quickshell startup exited with code {response}. See {shell_log}.", file=log, flush=True)
+                return False
             return True
-        report(launched.stdout.strip() or launched.stderr.strip())
-    if launcher.poll() is None:
-        report("не удалось запустить Quickshell в выбранном сеансе")
+        time.sleep(0.1)
+    print(f"Quickshell did not report startup. See {shell_log}.", file=log, flush=True)
     return False
+
+
+def run_profile(profile):
+    LOGS.mkdir(mode=0o700, parents=True, exist_ok=True)
+    session_log = LOGS / "session.log"
+    shell_log = LOGS / "quickshell.log"
+    shell_log.write_text("", encoding="utf-8")
+    with session_log.open("w", encoding="utf-8") as log:
+        print(f"Profile: {profile.id}", file=log, flush=True)
+        try:
+            command = shell_command(profile)
+            if not find_program("hyprctl"):
+                raise FileNotFoundError("hyprctl executable not found on PATH.")
+            config = profile_config(profile.hyprland, profile.hyprland_legacy)
+            env = profile_environment(profile)
+            print(f"Hyprland: {config}\nQuickshell: {profile.quickshell}", file=log, flush=True)
+            if not verify_config(config, env, log):
+                raise ValueError("Hyprland rejected the profile configuration.")
+            with TemporaryDirectory(prefix="hyprloader-shell-", dir=os.environ.get("XDG_RUNTIME_DIR")) as directory:
+                status = Path(directory) / "startup"
+                started = time.monotonic()
+                with subprocess.Popen(
+                    compositor_command(config), env=env, stdout=log, stderr=subprocess.STDOUT,
+                ) as launcher:
+                    ready = start_quickshell(launcher, config, command, status, shell_log, log)
+                    if not ready and launcher.poll() is None:
+                        report(f"Quickshell startup failed. See {session_log} and {shell_log}.")
+                        return launcher.wait()
+                    if ready:
+                        try:
+                            code = launcher.wait(timeout=max(0, 10 - (time.monotonic() - started)))
+                        except subprocess.TimeoutExpired:
+                            remember(profile)
+                            return launcher.wait()
+                        if code == 0:
+                            remember(profile)
+                            return code
+                    raise ValueError(f"The compositor exited during startup (code {launcher.returncode}).")
+        except (OSError, ValueError, subprocess.TimeoutExpired) as error:
+            print(error, file=log, flush=True)
+            report(f"{error} Loading the standard session. See {session_log}.")
+    return None
 
 
 def exec_default():
@@ -354,7 +518,7 @@ def start_session(requested):
         return 1
 
     available = profiles()
-    default = choose_default(available)
+    default = choose_default(available, load_theme(APP, CONFIG, report))
     if requested and requested not in available:
         report(f"неизвестный профиль: {requested}")
         return 2
@@ -373,37 +537,17 @@ def start_session(requested):
                 report(f"не удалось применить профиль {profile.name}")
                 exec_default()
         if profile.quickshell:
-            quickshell = find_program("quickshell", "qs")
-            if not (profile.quickshell_runner or quickshell):
-                raise FileNotFoundError("Quickshell executable not found on PATH.")
-            hyprland = find_program("Hyprland")
-            if not (hyprland and find_program("hyprctl")):
-                raise FileNotFoundError("Hyprland and hyprctl are required to start a profile.")
-            command = [str(profile.quickshell_runner), str(profile.quickshell)] if profile.quickshell_runner else [
-                quickshell, "--no-duplicate", "--path", str(profile.quickshell),
-            ]
-            verify = subprocess.run(
-                [hyprland, "--verify-config", "--config", str(profile.hyprland)], check=False,
-            )
-            if verify.returncode:
-                report(f"ошибка в настройках {profile.name}, загружается обычный сеанс")
-                exec_default()
-            env = os.environ | {"HYPRLOADER_CUSTOM_SHELL": "1"}
-            with subprocess.Popen(compositor_command(profile.hyprland), env=env) as launcher:
-                if start_quickshell(launcher, profile, command):
-                    remember(profile)
-                    return launcher.wait()
-                if launcher.poll() is None:
-                    return launcher.wait()
-            report("выбранный сеанс завершился до запуска Quickshell, загружается обычный сеанс")
-            exec_default()
-        remember(profile)
+            result = run_profile(profile)
+            if result is not None:
+                return result
+        else:
+            remember(profile)
     except (OSError, ValueError) as error:
         report(error)
     exec_default()
 
 
-def doctor():
+def doctor(profile_id):
     programs = {
         "Hyprland": find_program("Hyprland"),
         "hyprctl": find_program("hyprctl"),
@@ -414,8 +558,29 @@ def doctor():
     }
     for name, path in programs.items():
         print(f"{name}: {path or 'missing'}")
-    print(f"XDG_RUNTIME_DIR: {os.environ.get('XDG_RUNTIME_DIR') or 'missing'}")
+    runtime = os.environ.get("XDG_RUNTIME_DIR")
+    print(f"XDG_RUNTIME_DIR: {runtime or 'missing'}")
+    if runtime and runtime_socket_path_too_long(runtime):
+        print("XDG_RUNTIME_DIR may be too long for the Hyprland IPC socket path.")
     print(f"ZIP import directory: {INBOX}")
+    print(f"Session log: {LOGS / 'session.log'}")
+    print(f"Quickshell log: {LOGS / 'quickshell.log'}")
+    if profile_id:
+        profile = profiles().get(profile_id)
+        if profile is None:
+            report(f"Profile {profile_id} was not found. Run hyprloader list.")
+            return 2
+        if profile.hyprland:
+            try:
+                config = profile_config(profile.hyprland, profile.hyprland_legacy)
+                command = shell_command(profile)
+                print(f"Profile Hyprland config: {config}")
+                print(f"Profile Quickshell command: {shlex.join(command)}", flush=True)
+                if not verify_config(config, profile_environment(profile), sys.stdout):
+                    return 1
+            except (OSError, ValueError, subprocess.TimeoutExpired) as error:
+                report(error)
+                return 1
     return 0 if programs["Hyprland"] and programs["hyprctl"] and programs["dbus-run-session"] and (
         programs["Quickshell"] or programs["Rofi (fallback)"]
     ) else 1
@@ -425,12 +590,15 @@ def main():
     if sys.argv[1:] == ["_menu"]:
         boot_menu()
         return 0
+    if len(sys.argv) >= 5 and sys.argv[1] == "_shell":
+        return run_shell(Path(sys.argv[2]), Path(sys.argv[3]), sys.argv[4:])
 
     parser = argparse.ArgumentParser(prog="hyprloader")
     commands = parser.add_subparsers(dest="command")
     commands.add_parser("list", help="показать профили")
     commands.add_parser("preview", help="открыть меню без запуска сеанса")
-    commands.add_parser("doctor", help="check session dependencies")
+    diagnostics = commands.add_parser("doctor", help="check session dependencies and optionally a profile")
+    diagnostics.add_argument("profile", nargs="?")
     add = commands.add_parser("add", help="добавить пару конфигов в меню")
     add.add_argument("id", metavar="ID")
     add.add_argument("hyprland", metavar="HYPRLAND")
@@ -445,7 +613,7 @@ def main():
     if args.command == "session":
         return start_session(args.profile)
     if args.command == "doctor":
-        return doctor()
+        return doctor(args.profile)
     if args.command == "add":
         return add_profile(args)
     if args.command == "import":
@@ -458,7 +626,8 @@ def main():
         for profile in available.values():
             print(f"{profile.id}\t{profile.name}")
     else:
-        print(menu(available, choose_default(available)))
+        theme = load_theme(APP, CONFIG, report)
+        print(menu(available, choose_default(available, theme), theme))
     return 0
 
 

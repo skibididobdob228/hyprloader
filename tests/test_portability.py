@@ -1,9 +1,12 @@
 import os
 from pathlib import Path
+import runpy
+import signal
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import Mock, patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -55,6 +58,22 @@ class PortabilityTests(unittest.TestCase):
         )
         self.assertEqual(result, f'["{self.bin}/start-hyprland", "--", "--config", "bootstrap.lua"]')
 
+    def test_old_hyprland_accepts_a_profile_without_verify_flag(self):
+        self.fake("Hyprland", """case "$1" in
+    --version) printf 'Hyprland v0.43.0\\n' ;;
+    --help) printf '%s\\n' 'Options: --config FILE' ;;
+    *) exit 92 ;;
+esac
+""")
+        result = self.python_runtime(
+            'import os, sys; from pathlib import Path; from hyprland_runtime import profile_config, verify_config; '
+            'config = profile_config(Path("hyprland.lua"), Path("hyprland.conf")); '
+            'print(config.name); print(verify_config(config, os.environ.copy(), sys.stdout))',
+        )
+        self.assertEqual(result.splitlines()[0], "hyprland.conf")
+        self.assertIn("no --verify-config", result)
+        self.assertTrue(result.endswith("True"))
+
     def test_dispatch_syntax_follows_config_extension(self):
         self.fake("hyprctl", "printf '%s\\n' \"$@\"\n")
         result = self.python_runtime(
@@ -84,6 +103,31 @@ fi
             'print(wait_for_compositor(SimpleNamespace(pid=os.getpid(), poll=lambda: None), timeout=2))',
         )
         self.assertEqual(result, "test")
+
+    def test_menu_cleanup_targets_the_owned_compositor_on_timeout(self):
+        with patch.object(sys, "path", [str(ROOT / "app"), *sys.path]):
+            close_menu = runpy.run_path(str(ROOT / "app/hyprloader"))["finish_login_menu"]
+        launcher = Mock(pid=700)
+        launcher.wait.side_effect = [subprocess.TimeoutExpired("menu", 3), 0]
+        with patch.dict(close_menu.__globals__, {
+            "compositor_process": Mock(return_value=("owned", 701)),
+            "belongs_to": Mock(return_value=True),
+            "report": Mock(),
+        }), patch("os.kill") as kill:
+            close_menu(launcher)
+        kill.assert_called_once_with(701, signal.SIGTERM)
+        launcher.kill.assert_not_called()
+
+    def test_quickshell_failure_records_output_and_exit_status(self):
+        status = self.root / "status"
+        log = self.root / "quickshell.log"
+        result = subprocess.run(
+            [ROOT / "app/hyprloader", "_shell", status, log, SHELL, "-c", "echo QML-failed >&2; exit 7"],
+            env=self.env, check=False,
+        )
+        self.assertEqual(result.returncode, 7)
+        self.assertEqual(status.read_text(), "7")
+        self.assertIn("QML-failed", log.read_text())
 
     def test_system_install_registers_a_session_without_user_files(self):
         staged_root = self.root / "image"
