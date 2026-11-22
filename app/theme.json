@@ -1,0 +1,30 @@
+{
+  "title": "Hyprloader",
+  "subtitle": "Выбери профиль Hyprland и Quickshell",
+  "fontFamily": "Noto Sans",
+  "backgroundImage": "",
+  "backgroundMode": "cover",
+  "showBackdrop": true,
+  "showBrand": true,
+  "showDescription": true,
+  "showHints": true,
+  "menuWidth": 468,
+  "rowHeight": 0,
+  "rowRadius": 8,
+  "iconSize": 25,
+  "textSize": 20,
+  "horizontalOffset": 5.5,
+  "verticalOffset": -16,
+  "colors": {
+    "background": "#252628",
+    "accent": "#6bdded",
+    "text": "#f4f6f7",
+    "muted": "#babcbe",
+    "profile": "#c6c8ca",
+    "selected": "#45484b",
+    "search": "#202528"
+  },
+  "icons": {},
+  "layout": "",
+  "rofiTheme": ""
+}

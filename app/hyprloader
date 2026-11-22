@@ -1,0 +1,430 @@
+#!/usr/bin/python3
+"""Choose a Hyprland and Quickshell profile at login."""
+
+import argparse
+from dataclasses import dataclass
+from html import escape
+import json
+import os
+from pathlib import Path
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+from tempfile import TemporaryDirectory
+import time
+
+from menu_theme import load_theme
+from zip_profiles import ARCHIVE_ERRORS, import_archive, profile_store_lock
+
+
+APP = Path(__file__).resolve().parent
+HOME = Path.home()
+CONFIG = Path(os.environ.get("XDG_CONFIG_HOME") or HOME / ".config") / "hyprloader"
+DATA = Path(os.environ.get("XDG_DATA_HOME") or HOME / ".local/share") / "hyprloader"
+STATE = Path(os.environ.get("XDG_STATE_HOME") or HOME / ".local/state") / "hyprloader"
+INBOX = CONFIG / "imports"
+IMPORTED = DATA / "profiles"
+MANUAL = CONFIG / "profiles.d"
+MODES = HOME / ".config/serpantinum/modes"
+START = "/usr/bin/start-hyprland"
+HYPRCTL = "/usr/bin/hyprctl"
+QUICKSHELL = "/usr/bin/quickshell"
+SERPANTINUM = shutil.which("serpantinum") or str(HOME / ".local/bin/serpantinum")
+BASE = "serpantinum:default"
+MODE_HINTS = {
+    "default": "Базовый рабочий стол",
+    "minimal": "Графитовое оформление и компактная панель",
+    "cosmos": "Рабочий стол с чёрной дырой",
+    "backrooms": "Жёлтое оформление и 3D-комнаты",
+    "superlab": "Рабочий стол с 3D-лабораторией",
+}
+
+
+@dataclass(frozen=True)
+class Profile:
+    id: str
+    name: str
+    description: str
+    mode: str | None = None
+    hyprland: Path | None = None
+    quickshell: Path | None = None
+    quickshell_runner: Path | None = None
+    icon: Path | None = None
+
+
+def report(message):
+    print(f"Hyprloader: {message}", file=sys.stderr, flush=True)
+
+
+def read_text(path):
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except (OSError, ValueError):
+        return ""
+
+
+def read_object(path):
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise ValueError("ожидается объект JSON")
+    return value
+
+
+def localized(value, fallback=""):
+    if isinstance(value, dict):
+        value = value.get("ru") or value.get("en")
+    return " ".join(value.split()) if isinstance(value, str) and value.strip() else fallback
+
+
+def profile_file(manifest, value, extensions=None):
+    if not isinstance(value, str) or not value:
+        raise ValueError("путь к конфигурации обязателен")
+    path = manifest.parent / Path(value).expanduser()
+    if (extensions and path.suffix not in extensions) or not path.is_file() or not os.access(path, os.R_OK):
+        raise ValueError(f"файл конфигурации недоступен: {path}")
+    return path.absolute()
+
+
+def add_archive(archive, announce=False):
+    try:
+        identifier, added = import_archive(archive, IMPORTED, MANUAL)
+    except ARCHIVE_ERRORS as error:
+        report(f"{archive}: {error}")
+        return False
+    if announce:
+        print(f"Профиль {'добавлен' if added else 'уже добавлен'}: {identifier}")
+    return True
+
+
+def scan_archives():
+    try:
+        INBOX.mkdir(parents=True, exist_ok=True)
+        for archive in sorted(INBOX.iterdir()):
+            if archive.suffix.lower() == ".zip" and archive.is_file() and not archive.name.startswith("."):
+                add_archive(archive)
+    except OSError as error:
+        report(error)
+
+
+def profiles(scan=True):
+    if scan:
+        scan_archives()
+    found = {}
+    modes = []
+    for manifest in MODES.glob("*/mode.json"):
+        mode = manifest.parent.name
+        if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", mode):
+            continue
+        try:
+            info = read_object(manifest)
+            modes.append((int(info.get("order", 100)), mode, info))
+        except (OSError, TypeError, ValueError) as error:
+            report(f"{manifest}: {error}")
+    for _, mode, info in sorted(modes):
+        key = f"serpantinum:{mode}"
+        found[key] = Profile(
+            key, localized(info.get("name"), mode),
+            MODE_HINTS.get(mode) or localized(info.get("description"), "Режим Serpantinum"),
+            mode=mode,
+        )
+    found.setdefault(BASE, Profile(BASE, "Обычный", "Базовый рабочий стол"))
+
+    manifests = {
+        manifest.parent.name: manifest for manifest in sorted(IMPORTED.glob("*/profile.json"))
+        if not manifest.parent.name.startswith(".")
+    }
+    manifests.update({manifest.stem: manifest for manifest in sorted(MANUAL.glob("*.json"))})
+    for key, manifest in manifests.items():
+        try:
+            info = read_object(manifest)
+            if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", key):
+                raise ValueError("имя файла должно начинаться с латинской буквы или цифры")
+            runner = profile_file(manifest, info["quickshell_runner"]) if "quickshell_runner" in info else None
+            if runner and not os.access(runner, os.X_OK):
+                raise ValueError(f"файл запуска Quickshell не исполняемый: {runner}")
+            found[key] = Profile(
+                key,
+                localized(info.get("name"), key),
+                localized(info.get("description"), "Hyprland + Quickshell"),
+                hyprland=profile_file(manifest, info.get("hyprland"), {".lua", ".conf"}),
+                quickshell=profile_file(manifest, info.get("quickshell"), {".qml"}),
+                quickshell_runner=runner,
+                icon=profile_file(manifest, info["icon"]) if "icon" in info else None,
+            )
+        except (OSError, RuntimeError, ValueError) as error:
+            report(f"{manifest}: {error}")
+    return found
+
+
+def choose_default(available):
+    previous = read_text(STATE / "last-profile")
+    if previous in available and available[previous].quickshell:
+        return previous
+    active = f"serpantinum:{read_text(MODES / 'active')}"
+    return active if active in available else BASE
+
+
+def fallback_menu(available, default, theme):
+    entries = list(available.values())
+    rows = "\n".join(
+        f"<b>{escape(profile.name)}</b>    <span foreground='#9eacc3'>{escape(profile.description)}</span>"
+        for profile in entries
+    )
+    try:
+        result = subprocess.run(
+            [
+                "/usr/bin/rofi", "-no-config", "-no-plugins", "-dmenu", "-sync",
+                "-i", "-markup-rows", "-no-custom", "-format", "i",
+                "-theme", theme["rofiTheme"] or str(APP / "menu.rasi"),
+                "-window-title", theme["title"], "-p", "Поиск",
+                "-selected-row", str(list(available).index(default)), "-scroll-method", "1",
+            ],
+            input=rows + "\n", stdout=subprocess.PIPE, text=True, check=False,
+        )
+    except OSError as error:
+        report(error)
+        return default
+    if result.returncode == 0 and result.stdout.strip().isdecimal():
+        index = int(result.stdout)
+        if index < len(entries):
+            return entries[index].id
+    return default
+
+
+def menu(available, default):
+    theme = load_theme(APP, CONFIG, report)
+    with TemporaryDirectory(prefix="hyprloader-menu-", dir=os.environ.get("XDG_RUNTIME_DIR")) as directory:
+        data = Path(directory) / "profiles.json"
+        choice = Path(directory) / "choice"
+        data.write_text(json.dumps({
+            "defaultId": default,
+            "theme": theme,
+            "profiles": [
+                {
+                    "id": p.id, "name": p.name, "description": p.description,
+                    "icon": p.mode or "custom",
+                    "iconSource": theme["icons"].get(p.id) or (p.icon.as_uri() if p.icon else ""),
+                }
+                for p in available.values()
+            ],
+        }, ensure_ascii=False), encoding="utf-8")
+        env = os.environ | {
+            "HYPRLOADER_MENU_DATA": str(data),
+            "HYPRLOADER_MENU_CHOICE": str(choice),
+            "QT_QPA_PLATFORM": "wayland",
+        }
+        layouts = [APP / "menu.qml"]
+        if theme["layout"]:
+            layouts.insert(0, Path(theme["layout"]))
+        for layout in layouts:
+            choice.write_text("", encoding="utf-8")
+            try:
+                result = subprocess.run(
+                    [QUICKSHELL, "--path", str(layout)],
+                    env=env, stdout=sys.stderr, check=False,
+                )
+                selected = read_text(choice)
+                if result.returncode == 0 and selected in available:
+                    return selected
+            except OSError as error:
+                report(error)
+                break
+    report("основное меню недоступно, открывается резервное")
+    return fallback_menu(available, default, theme)
+
+
+def add_profile(args):
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", args.id):
+        report("идентификатор должен начинаться с латинской буквы или цифры и содержать только a–z, 0–9, _ или -")
+        return 2
+    directory = MANUAL
+    manifest = directory / f"{args.id}.json"
+    try:
+        hyprland = profile_file(manifest, str(Path(args.hyprland).expanduser().absolute()), {".lua", ".conf"})
+        quickshell = Path(args.quickshell).expanduser().absolute()
+        if quickshell.is_dir():
+            quickshell = next(
+                (quickshell / name for name in ("shell.qml", "Shell.qml") if (quickshell / name).is_file()),
+                quickshell / "shell.qml",
+            )
+        quickshell = profile_file(manifest, str(quickshell), {".qml"})
+        directory.mkdir(parents=True, exist_ok=True)
+        with profile_store_lock(IMPORTED), TemporaryDirectory(dir=directory) as staging:
+            if (IMPORTED / args.id).exists():
+                raise FileExistsError(args.id)
+            pending = Path(staging) / manifest.name
+            pending.write_text(json.dumps({
+                "name": localized(args.name, args.id),
+                "description": localized(args.description, "Hyprland + Quickshell"),
+                "hyprland": str(hyprland),
+                "quickshell": str(quickshell),
+            }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            os.link(pending, manifest)
+    except FileExistsError:
+        report(f"профиль {args.id} уже существует: {manifest}")
+        return 1
+    except (OSError, RuntimeError, ValueError) as error:
+        report(error)
+        return 1
+    print(f"Профиль {args.id} добавлен: {manifest}")
+    return 0
+
+
+def boot_menu(result_path):
+    instance = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE")
+    if not instance:
+        raise RuntimeError("меню запущено без экземпляра Hyprland")
+    try:
+        available = profiles(scan=False)
+        chosen = menu(available, choose_default(available))
+        result_path.write_text(chosen + "\n", encoding="utf-8")
+    finally:
+        subprocess.run([HYPRCTL, "-i", instance, "dispatch", "hl.dsp.exit()"], check=False)
+
+
+def select_at_login(available, default):
+    with TemporaryDirectory(prefix="hyprloader-", dir=os.environ.get("XDG_RUNTIME_DIR")) as directory:
+        selection = Path(directory) / "selection"
+        env = os.environ | {
+            "HYPRLAND_NO_SD_VARS": "1",
+            "HYPRLAND_NO_SD_NOTIFY": "1",
+            "HYPRLOADER_MENU_COMMAND": shlex.join([str(APP / "hyprloader"), "_menu", str(selection)]),
+        }
+        subprocess.run(
+            ["/usr/bin/dbus-run-session", "--", START, "--", "--config", str(APP / "bootstrap.lua")],
+            env=env, check=False,
+        )
+        return available.get(read_text(selection), available[default])
+
+
+def remember(profile):
+    try:
+        STATE.mkdir(parents=True, exist_ok=True)
+        with TemporaryDirectory(dir=STATE) as directory:
+            pending = Path(directory) / "last-profile"
+            pending.write_text(profile.id + "\n", encoding="utf-8")
+            pending.replace(STATE / "last-profile")
+    except OSError as error:
+        report(error)
+
+
+def start_quickshell(launcher, shell, runner=None):
+    children_path = Path(f"/proc/{launcher.pid}/task/{launcher.pid}/children")
+    command = shlex.join([str(runner), str(shell)] if runner else
+                         [QUICKSHELL, "--no-duplicate", "--path", str(shell)])
+    dispatch = f"hl.dsp.exec_cmd({json.dumps(command, ensure_ascii=False)})"
+    deadline = time.monotonic() + 20
+    while launcher.poll() is None and time.monotonic() < deadline:
+        children = read_text(children_path).split()
+        if children:
+            result = subprocess.run(
+                [HYPRCTL, "-j", "instances"], capture_output=True, text=True, check=False,
+            )
+            try:
+                instances = json.loads(result.stdout)
+            except ValueError:
+                instances = []
+            for instance in instances:
+                if str(instance["pid"]) not in children:
+                    continue
+                launched = subprocess.run(
+                    [HYPRCTL, "-i", instance["instance"], "dispatch", dispatch],
+                    capture_output=True, text=True, check=False,
+                )
+                if launched.returncode == 0 and launched.stdout.strip() == "ok":
+                    return True
+        time.sleep(0.2)
+    if launcher.poll() is None:
+        report("не удалось запустить Quickshell в выбранном сеансе")
+    return False
+
+
+def exec_default():
+    os.execv(START, [START])
+
+
+def start_session(requested):
+    if os.environ.get("WAYLAND_DISPLAY") or os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"):
+        report("сеанс нужно запускать из SDDM или TTY. Для просмотра меню есть hyprloader preview")
+        return 1
+
+    available = profiles()
+    default = choose_default(available)
+    if requested and requested not in available:
+        report(f"неизвестный профиль: {requested}")
+        return 2
+    try:
+        profile = available[requested] if requested else select_at_login(available, default)
+        if profile.mode and read_text(MODES / "active") != profile.mode:
+            with TemporaryDirectory(prefix="hyprloader-") as directory:
+                env = os.environ | {
+                    "XDG_RUNTIME_DIR": directory,
+                    "HYPRLAND_INSTANCE_SIGNATURE": "hyprloader-offline",
+                }
+                switched = subprocess.run(
+                    [SERPANTINUM, "mode", "set", profile.mode], env=env, check=False,
+                )
+            if switched.returncode or read_text(MODES / "active") != profile.mode:
+                report(f"не удалось применить профиль {profile.name}")
+                exec_default()
+        if profile.quickshell:
+            verify = subprocess.run(
+                ["/usr/bin/Hyprland", "--verify-config", "--config", str(profile.hyprland)], check=False,
+            )
+            if verify.returncode:
+                report(f"ошибка в настройках {profile.name}, загружается обычный сеанс")
+                exec_default()
+            env = os.environ | {"HYPRLOADER_CUSTOM_SHELL": "1"}
+            with subprocess.Popen([START, "--", "--config", str(profile.hyprland)], env=env) as launcher:
+                if start_quickshell(launcher, profile.quickshell, profile.quickshell_runner):
+                    remember(profile)
+                    return launcher.wait()
+                if launcher.poll() is None:
+                    return launcher.wait()
+            report("выбранный сеанс завершился до запуска Quickshell, загружается обычный сеанс")
+            exec_default()
+        remember(profile)
+    except (OSError, ValueError) as error:
+        report(error)
+    exec_default()
+
+
+def main():
+    if len(sys.argv) == 3 and sys.argv[1] == "_menu":
+        boot_menu(Path(sys.argv[2]))
+        return 0
+
+    parser = argparse.ArgumentParser(prog="hyprloader")
+    commands = parser.add_subparsers(dest="command")
+    commands.add_parser("list", help="показать профили")
+    commands.add_parser("preview", help="открыть меню без запуска сеанса")
+    add = commands.add_parser("add", help="добавить пару конфигов в меню")
+    add.add_argument("id", metavar="ID")
+    add.add_argument("hyprland", metavar="HYPRLAND")
+    add.add_argument("quickshell", metavar="QUICKSHELL")
+    add.add_argument("--name", help="название профиля в меню")
+    add.add_argument("--description", help="описание профиля")
+    archive = commands.add_parser("import", help="добавить профиль из ZIP")
+    archive.add_argument("zip", type=Path, metavar="ZIP")
+    session = commands.add_parser("session", help="выбрать профиль и запустить сеанс")
+    session.add_argument("profile", nargs="?")
+    args = parser.parse_args()
+    if args.command == "session":
+        return start_session(args.profile)
+    if args.command == "add":
+        return add_profile(args)
+    if args.command == "import":
+        return 0 if add_archive(args.zip.expanduser(), announce=True) else 1
+    available = profiles()
+    if args.command == "list":
+        for profile in available.values():
+            print(f"{profile.id}\t{profile.name}")
+    else:
+        print(menu(available, choose_default(available)))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

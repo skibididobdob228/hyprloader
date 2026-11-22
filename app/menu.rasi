@@ -1,0 +1,81 @@
+* {
+    font: "Noto Sans 12";
+    background-color: transparent;
+    text-color: #eaf0ff;
+}
+
+window {
+    location: center;
+    anchor: center;
+    width: calc(94% min 740px);
+    height: calc(94% min 510px);
+    border-radius: 24px;
+    border: 1px;
+    border-color: #374561;
+    background-color: #171f30;
+}
+
+mainbox {
+    padding: 24px;
+    spacing: 10px;
+    children: [textbox-heading, textbox-subtitle, inputbar, listview, textbox-keyhint];
+}
+
+textbox-heading {
+    expand: false;
+    content: "Hyprloader";
+    font: "Noto Sans Bold 26";
+    text-color: #eaf0ff;
+}
+
+textbox-subtitle {
+    expand: false;
+    content: "Выбери конфигурацию Hyprland и Quickshell";
+    text-color: #aab8d1;
+    margin: 0px 0px 7px;
+}
+
+inputbar {
+    children: [prompt, entry];
+    spacing: 14px;
+    padding: 10px 15px;
+    border-radius: 11px;
+    background-color: #101624;
+}
+
+prompt { text-color: #aab8d1; }
+entry { placeholder: "Название профиля"; placeholder-color: #798aa7; }
+
+listview {
+    lines: 8;
+    spacing: 5px;
+    scrollbar: false;
+    fixed-height: false;
+    dynamic: true;
+}
+
+element {
+    padding: 13px 15px;
+    border: 1px;
+    border-color: transparent;
+    border-radius: 11px;
+}
+
+element normal.normal, element alternate.normal {
+    background-color: #1c273b;
+}
+
+element selected.normal {
+    background-color: #273758;
+    border-color: #7495ed;
+}
+
+element-text { text-color: #eaf0ff; }
+
+textbox-keyhint {
+    expand: false;
+    content: "↑ ↓  Выбор       Enter  Загрузить       Esc  Профиль по умолчанию";
+    margin: 7px 0px 0px;
+    text-color: #aab8d1;
+    font: "Noto Sans 10";
+}
