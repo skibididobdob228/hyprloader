@@ -6,14 +6,27 @@ Hyprloader показывает полноэкранное меню профил
 
 ## Установка
 
-Нужны Python 3.10+, Hyprland с поддержкой Lua-конфигурации, Quickshell и `dbus-run-session`. Rofi используется как запасное меню.
+Нужны Python 3.10+, Hyprland с `hyprctl`, Quickshell и `dbus-run-session` в `PATH`. В качестве запасного меню подойдёт Rofi с поддержкой Wayland. Hyprloader использует `start-hyprland`, если он доступен, иначе запускает `Hyprland` напрямую.
 
 ```sh
+git clone https://github.com/skibididobdob228/hyprloader.git
+cd hyprloader
 ./install.sh
+~/.local/bin/hyprloader doctor
 ~/.local/bin/hyprloader preview
 ```
 
-Для интеграции со штатным сеансом Hyprland в SDDM запусти `./install.sh --sddm` и выбери **Hyprland** на экране входа. Из TTY меню запускается командой `hyprloader session`, а `hyprloader session work` сразу выбирает профиль `work`. Если `~/.local/bin` отсутствует в `PATH`, укажи полный путь к команде. **Super+Esc** закрывает меню при входе и продолжает загрузку с профилем по умолчанию.
+Из TTY меню запускается командой `~/.local/bin/hyprloader session`. Чтобы сразу загрузить нужный профиль, передай его ID, например `hyprloader session work`. **Super+Esc** закрывает меню при входе и продолжает загрузку с профилем по умолчанию.
+
+Если экран входа ищет сеансы в `/usr/local/share/wayland-sessions`, как SDDM, установи системный запуск и выбери **Hyprloader** на экране входа. У каждого пользователя будут свои профили и тема. [Каталоги сеансов SDDM](https://github.com/sddm/sddm/blob/develop/data/man/sddm.conf.rst.in)
+
+```sh
+sudo ./install.sh --system
+```
+
+Флаг `--sddm` по-прежнему доступен для установок, где используется прежний способ подключения через профиль пользователя.
+
+Для меню Hyprloader использует Hyprlang на версиях Hyprland до 0.55 и Lua начиная с 0.55. Для профилей выбирай формат, который читает установленная версия Hyprland. В Hyprland 0.57 используется Lua. [Анонс перехода на Lua](https://hypr.land/news/26_lua/) · [Конфигурация Hyprland 0.57](https://wiki.hypr.land/0.57.0/configuring/core/)
 
 В профиль «Обычный» загружается основной конфиг Hyprland. Если уже установлен Serpantinum, его режимы из `~/.config/serpantinum/modes` тоже появятся в списке.
 

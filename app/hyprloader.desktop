@@ -1,0 +1,5 @@
+[Desktop Entry]
+Name=Hyprloader
+Exec=/usr/local/bin/hyprloader session
+TryExec=/usr/local/bin/hyprloader
+Type=Application

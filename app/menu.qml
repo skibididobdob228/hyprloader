@@ -2,7 +2,6 @@ pragma ComponentBehavior: Bound
 
 import QtQuick
 import Quickshell
-import Quickshell.Hyprland
 import Quickshell.Io
 import Quickshell.Wayland
 
@@ -18,7 +17,7 @@ ShellRoot {
     readonly property var choices: query === "" ? data.profiles : data.profiles.filter(
         profile => (profile.name + " " + profile.description).toLowerCase().includes(query))
     readonly property int defaultIndex: data.profiles.findIndex(profile => profile.id === data.defaultId)
-    readonly property string monitorName: Hyprland.focusedMonitor?.name ?? ""
+    readonly property string monitorName: data.monitorName ?? ""
 
     function select(id: string): void {
         if (!choosing) {

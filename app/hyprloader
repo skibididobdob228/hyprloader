@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 """Choose a Hyprland and Quickshell profile at login."""
 
 import argparse
@@ -9,12 +9,13 @@ import os
 from pathlib import Path
 import re
 import shlex
-import shutil
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
-import time
 
+from hyprland_runtime import (
+    bootstrap_path, compositor_command, control, find_program, focused_monitor, wait_for_compositor,
+)
 from menu_theme import load_theme
 from zip_profiles import ARCHIVE_ERRORS, import_archive, profile_store_lock
 
@@ -27,11 +28,8 @@ STATE = Path(os.environ.get("XDG_STATE_HOME") or HOME / ".local/state") / "hyprl
 INBOX = CONFIG / "imports"
 IMPORTED = DATA / "profiles"
 MANUAL = CONFIG / "profiles.d"
-MODES = HOME / ".config/serpantinum/modes"
-START = "/usr/bin/start-hyprland"
-HYPRCTL = "/usr/bin/hyprctl"
-QUICKSHELL = "/usr/bin/quickshell"
-SERPANTINUM = shutil.which("serpantinum") or str(HOME / ".local/bin/serpantinum")
+MODES = CONFIG.parent / "serpantinum/modes"
+SERPANTINUM = find_program("serpantinum", str(HOME / ".local/bin/serpantinum"))
 BASE = "serpantinum:default"
 MODE_HINTS = {
     "default": "Базовый рабочий стол",
@@ -113,7 +111,7 @@ def profiles(scan=True):
         scan_archives()
     found = {}
     modes = []
-    for manifest in MODES.glob("*/mode.json"):
+    for manifest in MODES.glob("*/mode.json") if SERPANTINUM else ():
         mode = manifest.parent.name
         if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", mode):
             continue
@@ -167,6 +165,9 @@ def choose_default(available):
 
 
 def fallback_menu(available, default, theme):
+    rofi = find_program("rofi")
+    if not rofi:
+        return default
     entries = list(available.values())
     rows = "\n".join(
         f"<b>{escape(profile.name)}</b>    <span foreground='#9eacc3'>{escape(profile.description)}</span>"
@@ -175,7 +176,7 @@ def fallback_menu(available, default, theme):
     try:
         result = subprocess.run(
             [
-                "/usr/bin/rofi", "-no-config", "-no-plugins", "-dmenu", "-sync",
+                rofi, "-no-config", "-no-plugins", "-dmenu", "-sync",
                 "-i", "-markup-rows", "-no-custom", "-format", "i",
                 "-theme", theme["rofiTheme"] or str(APP / "menu.rasi"),
                 "-window-title", theme["title"], "-p", "Поиск",
@@ -195,11 +196,15 @@ def fallback_menu(available, default, theme):
 
 def menu(available, default):
     theme = load_theme(APP, CONFIG, report)
+    quickshell = find_program("quickshell", "qs")
+    if not quickshell:
+        return fallback_menu(available, default, theme)
     with TemporaryDirectory(prefix="hyprloader-menu-", dir=os.environ.get("XDG_RUNTIME_DIR")) as directory:
         data = Path(directory) / "profiles.json"
         choice = Path(directory) / "choice"
         data.write_text(json.dumps({
             "defaultId": default,
+            "monitorName": focused_monitor(),
             "theme": theme,
             "profiles": [
                 {
@@ -222,7 +227,7 @@ def menu(available, default):
             choice.write_text("", encoding="utf-8")
             try:
                 result = subprocess.run(
-                    [QUICKSHELL, "--path", str(layout)],
+                    [quickshell, "--path", str(layout)],
                     env=env, stdout=sys.stderr, check=False,
                 )
                 selected = read_text(choice)
@@ -272,28 +277,38 @@ def add_profile(args):
     return 0
 
 
-def boot_menu(result_path):
+def boot_menu():
     instance = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE")
     if not instance:
         raise RuntimeError("меню запущено без экземпляра Hyprland")
+    result_path = Path(os.environ["HYPRLOADER_BOOT_SELECTION"])
+    config = Path(os.environ["HYPRLOADER_BOOT_CONFIG"])
     try:
         available = profiles(scan=False)
         chosen = menu(available, choose_default(available))
         result_path.write_text(chosen + "\n", encoding="utf-8")
     finally:
-        subprocess.run([HYPRCTL, "-i", instance, "dispatch", "hl.dsp.exit()"], check=False)
+        control(instance, config)
 
 
 def select_at_login(available, default):
+    dbus = find_program("dbus-run-session")
+    if not dbus or not find_program("hyprctl") or not find_program("quickshell", "qs", "rofi"):
+        report("The login menu needs hyprctl, dbus-run-session and Quickshell or Rofi. Run hyprloader doctor.")
+        return available[default]
+    config = bootstrap_path(APP)
     with TemporaryDirectory(prefix="hyprloader-", dir=os.environ.get("XDG_RUNTIME_DIR")) as directory:
         selection = Path(directory) / "selection"
         env = os.environ | {
             "HYPRLAND_NO_SD_VARS": "1",
             "HYPRLAND_NO_SD_NOTIFY": "1",
-            "HYPRLOADER_MENU_COMMAND": shlex.join([str(APP / "hyprloader"), "_menu", str(selection)]),
+            "HYPRLOADER_MENU_LAUNCHER": str(APP / "hyprloader"),
+            "HYPRLOADER_MENU_COMMAND": shlex.join([str(APP / "hyprloader"), "_menu"]),
+            "HYPRLOADER_BOOT_SELECTION": str(selection),
+            "HYPRLOADER_BOOT_CONFIG": str(config),
         }
         subprocess.run(
-            ["/usr/bin/dbus-run-session", "--", START, "--", "--config", str(APP / "bootstrap.lua")],
+            [dbus, "--", *compositor_command(config)],
             env=env, check=False,
         )
         return available.get(read_text(selection), available[default])
@@ -310,44 +325,32 @@ def remember(profile):
         report(error)
 
 
-def start_quickshell(launcher, shell, runner=None):
-    children_path = Path(f"/proc/{launcher.pid}/task/{launcher.pid}/children")
-    command = shlex.join([str(runner), str(shell)] if runner else
-                         [QUICKSHELL, "--no-duplicate", "--path", str(shell)])
-    dispatch = f"hl.dsp.exec_cmd({json.dumps(command, ensure_ascii=False)})"
-    deadline = time.monotonic() + 20
-    while launcher.poll() is None and time.monotonic() < deadline:
-        children = read_text(children_path).split()
-        if children:
-            result = subprocess.run(
-                [HYPRCTL, "-j", "instances"], capture_output=True, text=True, check=False,
-            )
-            try:
-                instances = json.loads(result.stdout)
-            except ValueError:
-                instances = []
-            for instance in instances:
-                if str(instance["pid"]) not in children:
-                    continue
-                launched = subprocess.run(
-                    [HYPRCTL, "-i", instance["instance"], "dispatch", dispatch],
-                    capture_output=True, text=True, check=False,
-                )
-                if launched.returncode == 0 and launched.stdout.strip() == "ok":
-                    return True
-        time.sleep(0.2)
+def start_quickshell(launcher, profile, command):
+    instance = wait_for_compositor(launcher)
+    if instance:
+        launched = control(instance, profile.hyprland, shlex.join(command))
+        if launched.returncode == 0 and launched.stdout.strip() == "ok":
+            return True
+        report(launched.stdout.strip() or launched.stderr.strip())
     if launcher.poll() is None:
         report("не удалось запустить Quickshell в выбранном сеансе")
     return False
 
 
 def exec_default():
-    os.execv(START, [START])
+    command = compositor_command()
+    os.execv(command[0], command)
 
 
 def start_session(requested):
     if os.environ.get("WAYLAND_DISPLAY") or os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"):
         report("сеанс нужно запускать из SDDM или TTY. Для просмотра меню есть hyprloader preview")
+        return 1
+    if not find_program("Hyprland", "start-hyprland"):
+        report("Install Hyprland and make it available on PATH. Run hyprloader doctor.")
+        return 1
+    if not os.environ.get("XDG_RUNTIME_DIR"):
+        report("XDG_RUNTIME_DIR is missing. Start Hyprloader from a logged-in TTY or display manager.")
         return 1
 
     available = profiles()
@@ -370,15 +373,24 @@ def start_session(requested):
                 report(f"не удалось применить профиль {profile.name}")
                 exec_default()
         if profile.quickshell:
+            quickshell = find_program("quickshell", "qs")
+            if not (profile.quickshell_runner or quickshell):
+                raise FileNotFoundError("Quickshell executable not found on PATH.")
+            hyprland = find_program("Hyprland")
+            if not (hyprland and find_program("hyprctl")):
+                raise FileNotFoundError("Hyprland and hyprctl are required to start a profile.")
+            command = [str(profile.quickshell_runner), str(profile.quickshell)] if profile.quickshell_runner else [
+                quickshell, "--no-duplicate", "--path", str(profile.quickshell),
+            ]
             verify = subprocess.run(
-                ["/usr/bin/Hyprland", "--verify-config", "--config", str(profile.hyprland)], check=False,
+                [hyprland, "--verify-config", "--config", str(profile.hyprland)], check=False,
             )
             if verify.returncode:
                 report(f"ошибка в настройках {profile.name}, загружается обычный сеанс")
                 exec_default()
             env = os.environ | {"HYPRLOADER_CUSTOM_SHELL": "1"}
-            with subprocess.Popen([START, "--", "--config", str(profile.hyprland)], env=env) as launcher:
-                if start_quickshell(launcher, profile.quickshell, profile.quickshell_runner):
+            with subprocess.Popen(compositor_command(profile.hyprland), env=env) as launcher:
+                if start_quickshell(launcher, profile, command):
                     remember(profile)
                     return launcher.wait()
                 if launcher.poll() is None:
@@ -391,15 +403,34 @@ def start_session(requested):
     exec_default()
 
 
+def doctor():
+    programs = {
+        "Hyprland": find_program("Hyprland"),
+        "hyprctl": find_program("hyprctl"),
+        "start-hyprland (optional)": find_program("start-hyprland"),
+        "Quickshell": find_program("quickshell", "qs"),
+        "Rofi (fallback)": find_program("rofi"),
+        "dbus-run-session": find_program("dbus-run-session"),
+    }
+    for name, path in programs.items():
+        print(f"{name}: {path or 'missing'}")
+    print(f"XDG_RUNTIME_DIR: {os.environ.get('XDG_RUNTIME_DIR') or 'missing'}")
+    print(f"ZIP import directory: {INBOX}")
+    return 0 if programs["Hyprland"] and programs["hyprctl"] and programs["dbus-run-session"] and (
+        programs["Quickshell"] or programs["Rofi (fallback)"]
+    ) else 1
+
+
 def main():
-    if len(sys.argv) == 3 and sys.argv[1] == "_menu":
-        boot_menu(Path(sys.argv[2]))
+    if sys.argv[1:] == ["_menu"]:
+        boot_menu()
         return 0
 
     parser = argparse.ArgumentParser(prog="hyprloader")
     commands = parser.add_subparsers(dest="command")
     commands.add_parser("list", help="показать профили")
     commands.add_parser("preview", help="открыть меню без запуска сеанса")
+    commands.add_parser("doctor", help="check session dependencies")
     add = commands.add_parser("add", help="добавить пару конфигов в меню")
     add.add_argument("id", metavar="ID")
     add.add_argument("hyprland", metavar="HYPRLAND")
@@ -413,10 +444,15 @@ def main():
     args = parser.parse_args()
     if args.command == "session":
         return start_session(args.profile)
+    if args.command == "doctor":
+        return doctor()
     if args.command == "add":
         return add_profile(args)
     if args.command == "import":
         return 0 if add_archive(args.zip.expanduser(), announce=True) else 1
+    if args.command != "list" and not find_program("quickshell", "qs", "rofi"):
+        report("Install Quickshell or Wayland-capable Rofi to open the preview. Run hyprloader doctor.")
+        return 1
     available = profiles()
     if args.command == "list":
         for profile in available.values():

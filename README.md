@@ -6,14 +6,27 @@ Hyprloader opens a full-screen profile menu after you sign in. Each profile has 
 
 ## Installation
 
-You need Python 3.10 or newer, Hyprland with Lua configuration support, Quickshell, and `dbus-run-session`. Rofi serves as the fallback menu.
+You need Python 3.10 or newer, Hyprland with `hyprctl`, Quickshell, and `dbus-run-session` on your `PATH`. A Wayland-capable Rofi serves as the fallback menu. Hyprloader uses `start-hyprland` when it is available and launches `Hyprland` directly otherwise.
 
 ```sh
+git clone https://github.com/skibididobdob228/hyprloader.git
+cd hyprloader
 ./install.sh
+~/.local/bin/hyprloader doctor
 ~/.local/bin/hyprloader preview
 ```
 
-To integrate with the standard Hyprland session in SDDM, run `./install.sh --sddm` and choose **Hyprland** on the login screen. From a TTY, run `hyprloader session` to open the menu, or `hyprloader session work` to launch the `work` profile directly. If `~/.local/bin` is missing from your `PATH`, use the full path to the command. Press **Super+Esc** to close the login menu and continue with the default profile.
+From a TTY, run `~/.local/bin/hyprloader session` to open the menu. To launch a specific profile directly, pass its ID as in `hyprloader session work`. **Super+Esc** closes the login menu and continues with the default profile.
+
+For a login screen that discovers sessions from `/usr/local/share/wayland-sessions`, such as SDDM, install the system-wide launcher and then select **Hyprloader** on the login screen. Each user keeps their own profiles and theme. [SDDM session directories](https://github.com/sddm/sddm/blob/develop/data/man/sddm.conf.rst.in)
+
+```sh
+sudo ./install.sh --system
+```
+
+The `--sddm` flag remains available for installations that use the original SDDM profile hook.
+
+Hyprloader uses a Hyprlang menu config for Hyprland versions before 0.55 and a Lua menu config from 0.55 onward. Use profile files that your installed Hyprland version can read. Hyprland 0.57 uses Lua configs. [Hyprland's Lua announcement](https://hypr.land/news/26_lua/) · [Hyprland 0.57 configuration](https://wiki.hypr.land/0.57.0/configuring/core/)
 
 The base profile, labeled **Обычный** (Standard), loads your main Hyprland configuration. If Serpantinum is installed, its modes from `~/.config/serpantinum/modes` also appear in the list.
 
