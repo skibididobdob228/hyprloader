@@ -1,30 +1,32 @@
 # Hyprloader
 
-Hyprloader показывает полноэкранное меню профилей после входа в систему. У каждого профиля своя конфигурация Hyprland и Quickshell. Стрелки меняют выбор, Enter или клик запускает профиль, Esc выбирает профиль по умолчанию, а `/` открывает поиск.
+**English** · [Русский](README.ru.md)
 
-## Установка
+Hyprloader opens a full-screen profile menu after you sign in. Each profile has its own Hyprland and Quickshell configuration. Use the arrow keys to move between profiles, Enter or a click to launch the selected profile, Esc to load the default, and `/` to search.
 
-Нужны Python 3.10+, Hyprland с поддержкой Lua-конфигурации, Quickshell и `dbus-run-session`. Rofi используется как запасное меню.
+## Installation
+
+You need Python 3.10 or newer, Hyprland with Lua configuration support, Quickshell, and `dbus-run-session`. Rofi serves as the fallback menu.
 
 ```sh
 ./install.sh
 ~/.local/bin/hyprloader preview
 ```
 
-Для интеграции со штатным сеансом Hyprland в SDDM запусти `./install.sh --sddm` и выбери **Hyprland** на экране входа. Из TTY меню запускается командой `hyprloader session`, а `hyprloader session work` сразу выбирает профиль `work`. Если `~/.local/bin` отсутствует в `PATH`, укажи полный путь к команде. **Super+Esc** закрывает меню при входе и продолжает загрузку с профилем по умолчанию.
+To integrate with the standard Hyprland session in SDDM, run `./install.sh --sddm` and choose **Hyprland** on the login screen. From a TTY, run `hyprloader session` to open the menu, or `hyprloader session work` to launch the `work` profile directly. If `~/.local/bin` is missing from your `PATH`, use the full path to the command. Press **Super+Esc** to close the login menu and continue with the default profile.
 
-В профиль «Обычный» загружается основной конфиг Hyprland. Если уже установлен Serpantinum, его режимы из `~/.config/serpantinum/modes` тоже появятся в списке.
+The base profile, labeled **Обычный** (Standard), loads your main Hyprland configuration. If Serpantinum is installed, its modes from `~/.config/serpantinum/modes` also appear in the list.
 
-## Добавление ZIP
+## Importing ZIP profiles
 
-Положи архив в **`~/.config/hyprloader/imports/`**. При следующем открытии меню или вызове `hyprloader list` Hyprloader распакует его и добавит профиль. Можно также импортировать архив по полному пути.
+Drop a ZIP file into **`~/.config/hyprloader/imports/`**. Hyprloader extracts the archive and adds the profile the next time you open the menu or run `hyprloader list`. You can also import an archive by passing its path directly.
 
 ```sh
 hyprloader import ~/Downloads/work.zip
 hyprloader list
 ```
 
-Обычный ZIP обнаруживается по `hyprland.lua` или `hyprland.conf` и `shell.qml` или `Shell.qml`. Сохраняй структуру каталогов, чтобы внутри профиля оставались рабочими относительные ссылки на скрипты, модули и картинки.
+Hyprloader looks for `hyprland.lua` or `hyprland.conf` and `shell.qml` or `Shell.qml`. Keep the directory structure so relative references to scripts, modules, and images still work.
 
 ```text
 work.zip
@@ -35,35 +37,35 @@ work.zip
         └── shell.qml
 ```
 
-Положи `hyprloader.json` в корень архива или в общую верхнюю папку, если хочешь изменить название, добавить иконку или явно выбрать файлы запуска. Пути считаются от папки с манифестом. Поля `name`, `description` и `icon` необязательны.
+Put `hyprloader.json` at the archive root or in its top-level folder to set a display name, add an icon, or select the configuration files explicitly. Paths are relative to the manifest. The `name`, `description`, and `icon` fields are optional.
 
 ```json
 {
-  "name": "Работа",
-  "description": "Профиль с отдельной панелью",
+  "name": "Work",
+  "description": "A profile with its own panel",
   "hyprland": "hypr/hyprland.lua",
   "quickshell": "quickshell/shell.qml",
   "icon": "assets/work.svg"
 }
 ```
 
-Готовый профиль сохраняется в `~/.local/share/hyprloader/profiles/<id>/`. Идентификатор получается из имени ZIP. Архив можно убрать из папки импорта после добавления. Повторный импорт того же имени сохраняет установленную версию. Чтобы добавить вторую версию рядом, дай ZIP новое имя. В манифесте установленного профиля `profile.json` можно изменить название и описание.
+The imported profile is stored in `~/.local/share/hyprloader/profiles/<id>/`. Its ID comes from the ZIP filename. You can remove the ZIP from the import folder once it is installed. Importing a ZIP with the same name keeps the installed version. Give the archive a new name to install a second version alongside it. Edit the installed `profile.json` to rename the profile or change its description.
 
-Импорт сохраняет весь пакет в папке профиля. Для запуска Hyprloader использует два файла из архива, а их настройки и скрипты выполняются при выборе профиля. Если архив поставляется как установщик, ему всё равно нужна собственная установка зависимостей и файлов, на которые конфиги ссылаются через абсолютные пути. Для такого пакета можно зарегистрировать уже установленные файлы командой `hyprloader add`.
+Hyprloader stores the entire archive in the profile directory. When you select the profile, it loads the two configuration files, including the scripts those files run. If a bundle ships with an installer, use it to set up any dependencies and files referenced by absolute paths. You can then register those configurations with `hyprloader add`.
 
 ```sh
-hyprloader add work ~/.config/hypr-work/hyprland.lua ~/.config/quickshell/work/shell.qml --name "Работа"
+hyprloader add work ~/.config/hypr-work/hyprland.lua ~/.config/quickshell/work/shell.qml --name "Work"
 ```
 
-Если Quickshell нужен особый запуск, манифест поддерживает `quickshell_runner`. Это путь к исполняемому файлу внутри архива. Он получает абсолютный путь к QML первым аргументом.
+If Quickshell needs a custom launcher, set `quickshell_runner` to an executable path inside the archive. The launcher receives the absolute path to the QML file as its first argument.
 
-## Оформление меню
+## Customizing the menu
 
-Меняй **`~/.config/hyprloader/theme.json`** и запускай `hyprloader preview`. Достаточно указать параметры, которые хочешь изменить.
+Edit **`~/.config/hyprloader/theme.json`** and run `hyprloader preview`. Include only the settings you want to change.
 
 ```json
 {
-  "title": "Выбор рабочего стола",
+  "title": "Choose your desktop",
   "subtitle": "",
   "fontFamily": "Inter",
   "backgroundImage": "wallpapers/menu.jpg",
@@ -91,16 +93,16 @@ hyprloader add work ~/.config/hypr-work/hyprland.lua ~/.config/quickshell/work/s
 }
 ```
 
-| Настройка | Что меняет |
+| Setting | What it controls |
 | --- | --- |
-| `backgroundImage`, `backgroundMode` | Фон и режим изображения `cover`, `contain` или `stretch` |
-| `showBackdrop` | Геометрический фон, когда изображения нет |
-| `showBrand`, `showDescription`, `showHints` | Фирменный знак, описание профиля и подсказки по клавишам |
-| `menuWidth`, `rowHeight`, `rowRadius`, `iconSize`, `textSize` | Размеры интерфейса. `rowHeight: 0` подбирает высоту автоматически |
-| `horizontalOffset`, `verticalOffset` | Сдвиг меню от центра. Горизонтальный задаётся в процентах на широком экране, вертикальный в пикселях |
-| `icons` | Иконки по идентификаторам из `hyprloader list`. Подходят SVG и PNG |
-| `layout`, `rofiTheme` | Пути к своему QML-макету и запасной теме Rofi |
+| `backgroundImage`, `backgroundMode` | Background image and how it fits the screen. Choose `cover`, `contain`, or `stretch` |
+| `showBackdrop` | Geometric backdrop when no background image is set |
+| `showBrand`, `showDescription`, `showHints` | Hyprloader logo, profile descriptions, and keyboard hints |
+| `menuWidth`, `rowHeight`, `rowRadius`, `iconSize`, `textSize` | Interface dimensions. Set `rowHeight` to `0` for automatic sizing |
+| `horizontalOffset`, `verticalOffset` | Menu offset from the center. The horizontal offset is a percentage on wide screens, and the vertical offset is in pixels |
+| `icons` | SVG or PNG icons keyed by the profile IDs from `hyprloader list` |
+| `layout`, `rofiTheme` | Paths to a custom QML layout and fallback Rofi theme |
 
-Пути к обоям, иконкам и макетам считаются от каталога с `theme.json`. Абсолютные пути и `~` тоже поддерживаются. Hyprloader учитывает `XDG_CONFIG_HOME`, `XDG_DATA_HOME` и `XDG_STATE_HOME`.
+Wallpaper, icon, and layout paths are relative to the directory containing `theme.json`. Absolute paths and `~` are also supported. Hyprloader respects `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, and `XDG_STATE_HOME`.
 
-Для полной переделки макета скопируй `app/menu.qml`, `app/ProfileIcon.qml` и `app/Backdrop.qml` в свой каталог темы и укажи путь к копии `menu.qml` в поле `layout`. Меню читает JSON из файла, указанного в `HYPRLOADER_MENU_DATA`, записывает `id` выбранного профиля в файл `HYPRLOADER_MENU_CHOICE` и завершает Quickshell через `Qt.quit()`. Встроенный макет служит запасным вариантом.
+To redesign the whole menu, copy `app/menu.qml`, `app/ProfileIcon.qml`, and `app/Backdrop.qml` into your theme directory and set `layout` to your copy of `menu.qml`. The layout reads JSON from the file named by `HYPRLOADER_MENU_DATA`, writes the selected profile ID to the file named by `HYPRLOADER_MENU_CHOICE`, and exits Quickshell with `Qt.quit()`. The bundled layout serves as a fallback.
